@@ -1,0 +1,1 @@
+Destination for encoded (e.g. heap file) data representations used in testing.
