@@ -1,2 +1,3 @@
+*.pyc
 tests/data/raw/*.csv
 tests/data/encoded/*.dat
