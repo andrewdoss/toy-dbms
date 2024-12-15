@@ -7,6 +7,17 @@ from abc import ABC, abstractstaticmethod
 from io import BytesIO
 
 
+# custom errors
+class InsufficientSpaceError(ValueError):
+    """Thrown when a page has insufficient space for an insert.
+    
+    Using this to avoid a redundant serialization with an explicit public
+    'is there space?' type message. Instead, consumers should optimistically 
+    try an insert and handle the exception if a new HeapPage is needed.
+    """
+    pass
+
+
 # classes for encoding/decoding specific value data types
 class DType(ABC):
     @abstractstaticmethod
@@ -66,7 +77,8 @@ class HeapPage:
 
     TODO: doesn't handle concurrent iterators on same HeapPage.
     """
-    def __init__(self, page_size: int = 4096, init_buff: t.Optional[bytes] = None):
+    def __init__(self, schema: t.List[t.Tuple[str, t.Type[DType]]], page_size: int = 4096, init_buff: t.Optional[bytes] = None):
+        self._schema = schema
         if init_buff is None:
             self._buff = bytearray(page_size)
             self._record_pointers_end = 2
@@ -86,15 +98,23 @@ class HeapPage:
     def num_records(self) -> int:
         return struct.unpack("<H", self._buff[:2])[0]
     
-    def can_fit_record(self, record: bytes) -> bool:
-        return 2 + len(record) <= self._free_bytes() 
+    def _can_fit_record(self, record_bin: bytes) -> bool:
+        return 2 + len(record_bin) <= self._free_bytes() 
 
-    def insert_record(self, record: bytes) -> None:
-        if not self.can_fit_record(record):
-            raise ValueError("record exceeds free space in page")
-        self._records_start -= len(record)
+    def insert_record(self, record: t.List[str]) -> None:
+        """Optimistic record insertion.
+        
+        Caller must handle InsufficientSpaceError if page is too full.
+        """
+        record_bin = b"".join([
+            dtype.marshall(dtype.from_str(val))
+            for (_, dtype), val in zip(self._schema, record)
+        ])
+        if not self._can_fit_record(record_bin):
+            raise InsufficientSpaceError
+        self._records_start -= len(record_bin)
         self._record_pointers_end += 2
-        self._buff[self._records_start:self._records_start+len(record)] = record
+        self._buff[self._records_start:self._records_start+len(record_bin)] = record_bin
         self._buff[self._record_pointers_end-2:self._record_pointers_end] = struct.pack("<H", self._records_start)
         self._buff[:2] = struct.pack("<H", self.num_records + 1)
 
@@ -108,10 +128,14 @@ class HeapPage:
     def _get_record_start_idx(self, record_num: int) -> int:
         return struct.unpack("<H", self._buff[2+2*record_num:4+2*record_num])[0]
     
-    def __next__(self) -> bytearray:
+    def __next__(self) -> t.List[t.Any]:
         if self._iter_idx >= self.num_records:
             raise StopIteration
         record_start = self._get_record_start_idx(self._iter_idx)
         record_end = len(self._buff) if self._iter_idx == 0 else self._get_record_start_idx(self._iter_idx-1)
         self._iter_idx += 1
-        return self._buff[record_start:record_end]
+        record_buff = BytesIO(self._buff[record_start:record_end])
+        return [
+            dtype.unmarshall(record_buff)
+            for (_, dtype) in self._schema
+        ]

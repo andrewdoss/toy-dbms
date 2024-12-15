@@ -60,10 +60,42 @@ class Node(ABC):
         pass
 
 
+# 'abstract' is getting overloaded, the class names refer to abstract in terms
+# of a parsed statement representation while this base class is also 'abstract'
+# in the sense that it can't be instantiated
+class AbstractStatement(ABC):
+    pass
+
+
+class AbstractDDLStatement(AbstractStatement):
+    pass
+
+
+class AbstractDMLStatement(AbstractStatement):
+    pass
+
+
 @dataclass
-class AbstractQuery:
+class AbstractCreateTable(AbstractDDLStatement):
+    """Abstract CREATE TABLE statement, as if parsed from SQL"""
+    table: Table
+
+
+@dataclass
+class AbstractQuery(AbstractDMLStatement):
+    """Abstract SELECT statement, as if parsed from SQL"""
     from_clause: Table
     select_clause: t.Optional[t.List[str]] = None
     where_clause: t.Optional[Filter] = None
     order_clause: t.Optional[t.List[SortColumn]] = None
     limit_clause: t.Optional[int] = None
+
+@dataclass
+class AbstractInsert(AbstractDMLStatement):
+    """Abstract INSERT statement, as if parsed from SQL"""
+    into_clause: Table
+    # No nulls yet, require len(inner lists) == len(Table.schema)
+    # Require values as strings, as if parsed from a SQL statement.
+    values_clause: t.List[t.List[str]]
+    # TODO: option to insert from nested AbstractQuery
+
