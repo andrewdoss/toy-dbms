@@ -24,12 +24,12 @@ class Node(ABC):
     """The base Node interface is equivalent to the iterator interface."""
 
     def __init__(self, child: "Node"):
-        self.child = child
+        self._child = child
 
     @property
     def table(self) -> Table:
         """Allows a chain or iterators to all access the input table in case schema is needed."""
-        return self.child.table
+        return self._child.table
 
     def __iter__(self) -> "Node":
         """Each Node instance is both iterator and iterable, so it can only be iterated once."""
@@ -47,7 +47,7 @@ class FileScanNode(Node):
         self._input_table = table
         self._page_size = page_size
         self._file = open(table.data_path, 'rb')
-        self.child = self
+        self._child = self
         self._page = None
 
     @property
@@ -76,51 +76,69 @@ class FileScanNode(Node):
         self._file.close()
 
 
-class InsertNode(Node):
-    """Inserts to the end of a table heap file.
-    
-    TODO: rework as iterator taking values or query result
-    """
-
-    def __init__(self, table: Table, values: t.List[t.List[str]], page_size: int = DEFAULT_PAGE_SIZE):
-        self._values_written = False
-        self._input_table = table
+class ValuesNode(Node):
+    """Represents a list of values in a query as a node."""
+    def __init__(self, table: Table, values: t.List[t.List[str]]):
+        self._table = table
+        self._child = self
         self._values = values
+        self._idx = 0
+    
+    def __iter__(self):
+        return self
+
+    def __next__(self) -> t.List[t.Any]:
+        try:
+            record = [
+                dtype.from_str(val)
+                for (_, dtype), val in zip(self._table.schema, self._values[self._idx])
+            ]
+            self._idx += 1
+            return record
+        except IndexError:
+            raise StopIteration
+
+
+class InsertNode(Node):
+    """Inserts to the end of a table heap file."""
+    def __init__(
+            self,
+            child: Node,
+            table: Table,
+            page_size: int = DEFAULT_PAGE_SIZE
+        ):
+        self._dest_table = table
+        self._child = child
         self._page_size = page_size
-        self.child = self
+        self._num_inserted = 0
 
     @property
     def table(self) -> Table:
-        return self._input_table
+        return self._dest_table
     
     def __iter__(self):
         return self
     
-    # for now, just insert in one batch and return number of records inserted
-    # until I figure out if/how inserts should fit into the iteration model
     def __next__(self) -> t.List[t.Any]:
-        if self._values_written:
+        """For now, process all inserts in one batch and return num inserted."""
+        if self._num_inserted > 0:
             raise StopIteration
-        with open(self._input_table.data_path, 'rb+') as f:
-            # Initialize with last page of file. For now, assumes at least one page
-            # exists
+        with open(self._dest_table.data_path, 'rb+') as f:
+            # initialize with last page in the table
             f.seek(-self._page_size, SEEK_END)
-            page = HeapPage(self._input_table.schema, init_buff=f.read(self._page_size))
-            # Maintain an invariant that the file location is always the start
-            # of the currently loaded page
+            page = HeapPage(self._dest_table.schema, init_buff=f.read(self._page_size))
             f.seek(-self._page_size, SEEK_END)
-            for record in self._values:
+            for record in self._child:
                 try:
                     page.insert_record(record)
                 except InsufficientSpaceError:
-                    print('here')
                     f.write(page.marshall())
-                    page = HeapPage(self._input_table.schema)
+                    page = HeapPage(self._dest_table.schema)
                     page.insert_record(record)
+                self._num_inserted += 1
             if page.num_records > 0:
                 f.write(page.marshall())
-            self._values_written = True
-            return [len(self._values)]
+            return [self._num_inserted]
 
 
 class ProjectionNode(Node):
@@ -129,7 +147,7 @@ class ProjectionNode(Node):
         child: Node,
         projection_columns: t.List[str],
     ):
-        self.child = child
+        self._child = child
         self.projection_col_idxs = [
             self.table.columns.index(col) for col in projection_columns
         ]
@@ -138,13 +156,13 @@ class ProjectionNode(Node):
         return self
 
     def __next__(self) -> t.List[t.Any]:
-        row = next(self.child)
+        row = next(self._child)
         return [row[i] for i in self.projection_col_idxs]
 
 
 class SelectionNode(Node):
     def __init__(self, child: Node, filter: Filter):
-        self.child = child
+        self._child = child
         self.filter = filter
         self.col_arg_idxs = [
             self.table.columns.index(col) for col in filter.column_args
@@ -155,14 +173,14 @@ class SelectionNode(Node):
 
     def __next__(self) -> t.List[t.Any]:
         while True:
-            row = next(self.child)
+            row = next(self._child)
             if self.filter.predicate(*[row[i] for i in self.col_arg_idxs]):
                 return row
 
 
 class LimitNode(Node):
     def __init__(self, child: Node, limit: int):
-        self.child = child
+        self._child = child
         self.limit = limit
 
     def __iter__(self):
@@ -172,18 +190,18 @@ class LimitNode(Node):
         if self.limit <= 0:
             raise StopIteration
         self.limit -= 1
-        return next(self.child)
+        return next(self._child)
 
 
 class SortNode(Node):
     def __init__(self, child: Node, sort_columns: t.List[SortColumn]):
-        self.child = child
+        self._child = child
         self.sort_columns = sort_columns
         # Store reverse sorted rows so they can be popped when node is iterated
         self.reverse_sorted_rows = None
 
     def _init_sorted_rows(self) -> None:
-        rows = [r for r in self.child]
+        rows = [r for r in self._child]
         # sort in opposite order of specifed columns for correct pecedence
         for sort_column in reversed(self.sort_columns):
             col_idx = self.table.columns.index(sort_column.column)
@@ -216,19 +234,34 @@ def execute_ddl(s: AbstractDDLStatement) -> None:
         raise ValueError(f"Received unrecognized AbstractDDLStatement type: {type(s)}")
     
 
+def _get_abstract_query_entry_node(s: AbstractQuery) -> Node:
+    entry_node = FileScanNode(s.from_clause)
+    if s.where_clause is not None:
+        entry_node = SelectionNode(entry_node, s.where_clause)
+    if s.order_clause:
+        entry_node = SortNode(entry_node, s.order_clause)
+    if s.limit_clause:
+        entry_node = LimitNode(entry_node, s.limit_clause)
+    if s.select_clause:
+        entry_node = ProjectionNode(entry_node, s.select_clause)
+    return entry_node
+
+
 def execute_dml(s: AbstractDMLStatement) -> t.List[t.List[t.Any]]:
     if isinstance(s, AbstractQuery):
-        entry_node = FileScanNode(s.from_clause)
-        if s.where_clause is not None:
-            entry_node = SelectionNode(entry_node, s.where_clause)
-        if s.order_clause:
-            entry_node = SortNode(entry_node, s.order_clause)
-        if s.limit_clause:
-            entry_node = LimitNode(entry_node, s.limit_clause)
-        if s.select_clause:
-            entry_node = ProjectionNode(entry_node, s.select_clause)
+        entry_node = _get_abstract_query_entry_node(s)
     elif isinstance(s, AbstractInsert):
-        entry_node = InsertNode(s.into_clause, s.values_clause)
+        # self._child is an interator yielding t.List[Any] with the same schema
+        # as the input table
+        if s.values_clause is not None and s.from_clause is not None:
+            raise ValueError("Can't define both values_clause and from_clause")
+        elif s.values_clause is not None:
+            child = ValuesNode(s.into_clause, s.values_clause)
+        elif s.from_clause is not None:
+            child = _get_abstract_query_entry_node(s.from_clause)
+        else:
+            raise ValueError("One of values_clause or from_clause must be defined")
+        entry_node = InsertNode(child, s.into_clause)
     else:
         raise ValueError(f"Received unrecognized AbstractDMLStatement type: {type(s)}")
     return [r for r in entry_node]
@@ -236,7 +269,7 @@ def execute_dml(s: AbstractDMLStatement) -> t.List[t.List[t.Any]]:
 
 def execute(s: AbstractStatement) -> t.Optional[t.List[t.List[t.Any]]]:
     if isinstance(s, AbstractDDLStatement):
-       return execute_ddl(s)
+        return execute_ddl(s)
     elif isinstance(s, AbstractDMLStatement):
         return execute_dml(s)
     else:

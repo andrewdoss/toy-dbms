@@ -101,13 +101,13 @@ class HeapPage:
     def _can_fit_record(self, record_bin: bytes) -> bool:
         return 2 + len(record_bin) <= self._free_bytes() 
 
-    def insert_record(self, record: t.List[str]) -> None:
+    def insert_record(self, record: t.List[t.Any]) -> None:
         """Optimistic record insertion.
         
         Caller must handle InsufficientSpaceError if page is too full.
         """
         record_bin = b"".join([
-            dtype.marshall(dtype.from_str(val))
+            dtype.marshall(val)
             for (_, dtype), val in zip(self._schema, record)
         ])
         if not self._can_fit_record(record_bin):

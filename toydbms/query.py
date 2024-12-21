@@ -96,6 +96,7 @@ class AbstractInsert(AbstractDMLStatement):
     into_clause: Table
     # No nulls yet, require len(inner lists) == len(Table.schema)
     # Require values as strings, as if parsed from a SQL statement.
-    values_clause: t.List[t.List[str]]
-    # TODO: option to insert from nested AbstractQuery
+    # Exactly one of values clause or from clause is required
+    values_clause: t.Optional[t.List[t.List[str]]] = None
+    from_clause: t.Optional[AbstractQuery] = None
 
