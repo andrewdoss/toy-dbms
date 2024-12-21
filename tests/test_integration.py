@@ -52,7 +52,10 @@ class TestIntegration(unittest.TestCase):
         """Needs refactoring, but currently one big integration test that:
         
         - Queries a table
-        - Inserts more rows
+        - Inserts more rows into the table
+        - Queries again to confirm inserts
+        - Inserts rows into a new table
+        - Inserts rows into original table by querying new table
         - Queries again to confirm inserts
         """
         table = DATABASE["movies"]
